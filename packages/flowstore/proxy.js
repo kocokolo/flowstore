@@ -17,36 +17,89 @@ let properties = {
   }
 };
 
+function commonGetterState(store, prop) {
+  var state = store._getState();
+  var val = UnSet;
+  if (state && state.hasOwnProperty(prop)) {// 从state中查找
+    if (store._isMapping) {
+      val = resolveVariable(state[prop], store._parentFlow);
+    } else {
+      val = state[prop];
+    }
+  }
+  return val;
+}
+
+function commonGetter(store, proxyObj, prop) {
+  // 默认"未设置"
+  var val = UnSet;
+  if (prop == "__super") {// 特殊属性
+    return store._parentFlow;
+  }
+  if (prop == "_isVue") {// 特殊属性
+    return true;
+  }
+  if (typeof prop == "string" && prop.startsWith(NAME_PRE)) {// 指定节点名称查找
+    return store.findStore(prop.replace(new RegExp(`^${NAME_PRE}`), ""));
+  }
+  if (prop in Object.prototype) {// 原型上的方法和属性，如hasOwnProperty
+    val = Object.prototype[prop];
+  } else if (prop in store) {// 自身的方法和属性，class(flow class ,store class ) 上的方法 createObject,state
+    val = store[prop];
+    if (typeof val == "function") {
+      val = val.bind(store);
+    }
+  } else if (proxyObj.hasOwnProperty(prop) && proxyObj[prop] != UnSet) {// 自定义的属性
+    val = proxyObj[prop];
+  }
+  return val;
+}
+
+function commonSetter(proxyObj, prop, value) {
+  proxyObj[prop] = value;
+  console.warn(`${prop}字段被非法更改，不建议直接修改proxy里的数据，请检查`);
+  return true;
+}
+
+function commonGetterParent(store, prop) {
+  if (store._parentFlow && !store._localed) {// 向上查找
+    return store._parentFlow[prop];
+  }
+  // 默认"未设置"
+  return UnSet;
+}
+
+function commonGetOwnPropertyDescriptor(state, prop) {
+  if (properties[prop]) {
+    return properties[prop];
+  }
+  return Object.getOwnPropertyDescriptor(state, prop);
+}
+
 const UnSet = Symbol("UnSet");
 
-export default function ProxyState(flow) {
+/**
+ * 普通的代理访问
+ * @param store
+ * @returns {PropertyDescriptor|PropertyKey[]|boolean|any}
+ * @constructor
+ */
+export default function ProxyState(store) {
   const proxyObj = Object.create({}, {
     ...properties
   });
   const getVal = function (prop) {
-    if (prop == "__super") {// 特殊属性
-      return flow._parentFlow;
-    }
-    if (typeof prop == "string" && prop.startsWith(NAME_PRE)) {// 指定节点名称查找
-      return flow.findStore(prop.replace(new RegExp(`^${NAME_PRE}`), ""));
-    }
-    let val = UnSet; // 默认"未设置"
-    if (prop in flow) {// 自身的方法和属性，like "newObject"
-      val = flow[prop];
-      if (typeof val == "function") {
-        val = val.bind(flow);
-      }
+    let val = commonGetter(store, proxyObj, prop);
+    if (val !== UnSet) {
       return val;
-    }
-    let state = flow.state;
-    if (state.hasOwnProperty(prop)) {// 从state中查找
-      if (flow._isMapping) {
-        val = resolveVariable(state[prop], flow._parentFlow);
-      } else {
-        val = state[prop];
+    } else {
+      val = commonGetterState(store, prop);
+      if (val == UnSet) {
+        val = commonGetterParent(store, prop);
       }
-    } else if (flow._parentFlow && !flow._localed) {// 向上查找
-      val = flow._parentFlow[prop];
+    }
+    if (val == UnSet) {
+      return undefined;
     }
     return val;
   }
@@ -54,22 +107,25 @@ export default function ProxyState(flow) {
     // .xxx [xxx]
     get: function (origin, prop) {
       var val = getVal(prop);
-      if (val == UnSet) {
-        val = undefined;
-      }
       return val;
+    },
+    // not-support
+    set: function (target, key, value) {
+      return commonSetter(proxyObj, key, value);
     },
     // in 
     has(target, key) {
-      var val = getVal(key);
-      if (val !== UnSet) {
+      if (key in store._getState()) {
         return true;
+      }
+      if (store._parentFlow) {
+        return key in store._parentFlow;
       }
       return false;
     },
-    // hasOwnProperty getOwnPropertyDescriptor
-    getOwnPropertyDescriptor(target, property) {
-      return Object.getOwnPropertyDescriptor(flow.state, property)
+    //对外 hasOwnProperty 用, ownKeys里的key都需要有，否则遍历会报错
+    getOwnPropertyDescriptor(target, prop) {
+      return commonGetOwnPropertyDescriptor(store._getState(), prop);
     },
     // keys() {...} 
     ownKeys() {
@@ -77,67 +133,116 @@ export default function ProxyState(flow) {
       // detail :https://blog.csdn.net/weixin_43513495/article/details/99444827
       // 先清理
       Object.keys(proxyObj).forEach(function (key) {
-        delete proxyObj[key];
+        if (proxyObj[key] == UnSet) {
+          delete proxyObj[key];
+        }
       });
       // 再新增
-      Object.keys(flow.state).map(function (key) {
+      Object.keys(store._getState()).map(function (key) {
         proxyObj[key] = UnSet;
       });
       // 这样返回的key外界才能访问到
       return Reflect.ownKeys(proxyObj);
-    },
-    // not-support
-    set: function (target, key, value) {
-      console.warn(`proxyObj ${key} 无效更改`);
-      return true;
     }
   };
   return new Proxy(proxyObj, handler);
 }
 
-export function ProxyChild(flow, fieldName) {
-  var self = flow;
+/**
+ * 将多个store代理为一个
+ * @param store
+ * @returns {*|PropertyDescriptor|PropertyKey[]|boolean|any}
+ * @constructor
+ */
+export function ProxyChildren(store) {
   const proxyObj = Object.create({}, {
     ...properties
   });
-  const handler = {
-    get: function (origin, prop) {
-      // todo perf
-      if (self.state && self.state[fieldName]) {
-        return self.state[fieldName][prop];
-      }
-      return proxyObj[prop];
-    },
-    // in 
-    has(target, key) {
-      // todo perf
-      if (self.state && (key in self.state[fieldName])) {
+  const getVal = function (prop) {
+    let val = commonGetter(store, proxyObj, prop);
+    if (val !== UnSet) {
+      return val;
+    }
+    let childFlows = (store._childFlows || []).concat([]).reverse();
+    let state;
+    let foundFlow;
+    childFlows.find(function (flow) {
+      let st = flow && flow._getState();
+      if (st && st.hasOwnProperty(prop)) {
+        state = st;
+        foundFlow = flow;
         return true;
+      }
+    });
+    if (state) {// 从state中查找
+      if (foundFlow._isMapping) {
+        val = resolveVariable(state[prop], foundFlow._parentFlow);
+      } else {
+        val = state[prop];
+      }
+    }
+    if (val == UnSet) {
+      val = commonGetterParent(store, prop);
+    }
+    if (val == UnSet) {
+      return undefined;
+    }
+    return val;
+  }
+  const handler = {
+    // .xxx [xxx]
+    get: function (origin, prop) {
+      var val = getVal(prop);
+      return val;
+    },
+    set: function (target, key, value) {
+      return commonSetter(proxyObj, key, value);
+    },
+    // in for..of
+    has(target, key) {
+      let childFlows = store._childFlows || [];
+      let flow = childFlows.find(function (_flow) {
+        return key in _flow._getState();
+      });
+      if (flow) {
+        return true;
+      }
+      if (store._parentFlow) {
+        return key in store._parentFlow;
       }
       return false;
     },
-    // hasOwnProperty getOwnPropertyDescriptor
-    getOwnPropertyDescriptor(target, property) {
-      if (self.state && self.state[fieldName]) {
-        return Object.getOwnPropertyDescriptor(self.state[fieldName], property)
+    // hasOwnProperty 用, ownKeys里的key都需要有，否则遍历会报错
+    getOwnPropertyDescriptor(target, prop) {
+      if (properties[prop]) {
+        return properties[prop];
       }
-    },
-    ownKeys() {
-      // todo perf
-      Object.keys(proxyObj).forEach(function (key) {
-        delete proxyObj[key];
-      })
-      Object.keys(self.state[fieldName]).map(function (key) {
-        proxyObj[key] = UnSet;
+      let childFlows = store._childFlows || [];
+      let foundFlow = childFlows.find(function (flow) {
+        return flow.hasOwnProperty(prop)
       });
-      return Reflect.ownKeys(proxyObj);
+      return foundFlow && Object.getOwnPropertyDescriptor(foundFlow, prop)
     },
-    set: function (target, key, value) {
-      proxyObj[key] = value;
-      console.info(`proxyObj ${key} 被非法更改`);
-      return true;
+    // keys() {...} 
+    ownKeys() {
+      // @important 占坑，但不赋值，从而支持(遍历{...},hasOwnProperty,Object.keys等)
+      // detail :https://blog.csdn.net/weixin_43513495/article/details/99444827
+      // 先清理
+      Object.keys(proxyObj).forEach(function (key) {
+        if (proxyObj[key] == UnSet) {// 自定义属性要保留
+          delete proxyObj[key];
+        }
+      });
+      // 再新增
+      let childFlows = store._childFlows || [];
+      childFlows.forEach(function (flow) {
+        Object.keys(flow).map(function (key) {
+          proxyObj[key] = UnSet;
+        });
+      });
+      // 这样返回的key外界才能访问到
+      return Reflect.ownKeys(proxyObj);
     }
   };
-  let p = new Proxy(proxyObj, handler);
-  return p;
+  return new Proxy(proxyObj, handler);
 }

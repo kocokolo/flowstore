@@ -1,6 +1,6 @@
 import Store from './store';
 
-import ProxyState, {ProxyChild} from './proxy';
+import ProxyState, {ProxyChildren} from './proxy';
 
 import {getLogger} from "packages/logging/runtime";
 
@@ -13,7 +13,7 @@ const console = getLogger('${srcPath}');
 // 3、每次都创建新flow，不能影响已经创建的flow
 
 // 拷贝一个新flow
-function getFLowOptions(self) {
+function getFLowStoreOptions(self) {
   return {
     ...self._options,
     store: {
@@ -44,24 +44,81 @@ function simpleOptions(options) {
 
 export default class FLowStore extends Store {
   constructor(parentFlow, options = {}) {
-    const {name, store, localed, isMapping} = options;
+    const {name, store, localed, isJoined, path, childFlows, isMapping} = options;
     super(options);
     this._options = options;
-    // Store节点名称
-    this._name = name;
     // 是否是本地化的store
     this._localed = !!localed;
     // 是否是mapping的store
     this._isMapping = !!isMapping
-    // 父级flowstore
+    // parentFlow
     this._parentFlow = parentFlow;
-    // 当前的sflowstore
+    // 是否多个childflow共同协作
+    this._isJoined = !!isJoined;
+    // 是否分发
+    this._path = path;
+    // 子flows
+    this._childFlows = childFlows || [];
+    // 当前flow
     this._flow = this._makeFlow();
-    return this._flow;
+    let idx = parentFlow && parentFlow.addChildFlow(this._flow);
+    // Store节点名称
+    if (name) {
+      this._name = name;
+    } else if (idx) {
+      this._name = (parentFlow._name || "") + "/" + idx;
+    }
+    return this._flow; // 注意：此处返回的是被代理过的storeflow
   }
 
+  // 利用proxy技术将store转换成"flowstore"
   _makeFlow() {
-    return ProxyState(this);
+    return this._isJoined ? ProxyChildren(this) : ProxyState(this);
+  }
+
+  // 获取当前store的state , 用于代理到flow上访问state
+  _getState() {
+    let state = this.state;
+    if (this._path != null) {
+      // todo perf 此处造成了访问
+      return this._parentFlow[this._path];
+      // var paths = [];
+      // let temp = this;// this is a store
+      // do {
+      //   if (temp._path != null) {
+      //     paths.unshift(temp._path);
+      //   } else {
+      //     break;
+      //   }
+      //   temp = temp._parentFlow; // this is a flow
+      // } while (temp);
+      // let found = paths.every(function (path) {
+      //   if (state && state.hasOwnProperty(path)) {
+      //     state = state[path];
+      //     return true;
+      //   }
+      //   return false;
+      // });
+      // if (!found) {
+      //   return {}
+      // }
+    }
+    return state;
+  }
+
+  addChildFlow(flow) {
+    this._childFlows.push(flow);
+    return this._childFlows.length - 1;
+  }
+
+  removeChildFlow(delFlow) {
+    let idx = this._childFlows.findIndex(flow => flow == delFlow);
+    ~idx && this._childFlows.splice(idx, 1);
+    return true;
+  }
+
+  getChildFlow(idx) {
+    return this._childFlows[idx];
   }
 
   /**
@@ -71,7 +128,7 @@ export default class FLowStore extends Store {
     if (copyOptions) {
       let self = this;
       return new FLowStore(this._parentFlow, {
-        ...getFLowOptions(self),
+        ...getFLowStoreOptions(self),
         localed: localed,
         ...copyOptions
       })
@@ -124,7 +181,7 @@ export default class FLowStore extends Store {
     let flow = new FLowStore(self._parentFlow, options);
     // 需要重新创建一个新节点，不能直接修改原来的节点
     flow = new FLowStore(flow, {
-      ...getFLowOptions(self)
+      ...getFLowStoreOptions(self)
     });
     return flow;
   }
@@ -145,17 +202,33 @@ export default class FLowStore extends Store {
     });
   }
 
+  joinStore(stores) {
+    let self = this;
+    let joinFlow = new FLowStore(this._flow, {
+      isJoined: true
+    });
+
+    stores && stores.forEach(function (options) {
+      options = simpleOptions(options);
+      let flow = new FLowStore(joinFlow, options);
+      joinFlow.addChildFlow(flow);
+    });
+
+    return joinFlow;
+  }
+
   /**
    * 将当前设置的状态提前
    * @param fieldName 对象的属性或者数组的index
    * @returns {FLowStore|...*}
    */
-  pickStore(fieldName) {
+  pickStore(path) {
     let self = this;
     return new FLowStore(this._flow, {
+      path: path,
       store: {
         state() {
-          return ProxyChild(self, fieldName);
+          return self.state;
         }
       }
     });

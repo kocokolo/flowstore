@@ -3,7 +3,7 @@ import FLowStore from './flow';
 let rootState = {};
 
 const RootFlowStore = new FLowStore(null, {
-  name: '--system--',
+  name: 'ROOT',
   store: {
     state() {
       return rootState;

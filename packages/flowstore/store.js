@@ -17,11 +17,13 @@ function unifyObjectStyle(type, payload, options) {
 
 export default class Store {
   constructor(options) {
-    const {store, highLevel} = options;
+    const {store, isIntercept, isStateReactive} = options;
     this._actions = Object.create(null);
     this._mutations = Object.create(null);
-    // 提升数据层级，这样新增字段可以获取到响应 。开启后查找过程会经历访问，如果动态新增字段会得到更新
-    this._highLevel = !!highLevel;
+    // 开启后查找过程会被拦截，如果此节点动态新增字段，后代节点会得到更新
+    this._isIntercept = !!isIntercept;
+    // 数据本身是响应的
+    this._isStateReactive = !!isStateReactive;
     let state = store && store.state && store.state() || {};// store or data
     this.setState(state);
     this.register(store);
@@ -67,10 +69,10 @@ export default class Store {
 
   setState(state) {
     // state变成Observable
-    if (!state._isVue) {
+    if (!state._isVue && !this._isStateReactive) {
       Vue.observable(state);
     }
-    if (this._highLevel) {
+    if (this._isIntercept) {
       this._state = Vue.observable({
         state
       });
@@ -82,6 +84,9 @@ export default class Store {
   }
 
   register(config) {
+    if (!config) {
+      return;
+    }
     config.mutations && Object.keys(config.mutations).forEach((mutation) => {
       this.registerMutation(mutation, config.mutations[mutation])
     });

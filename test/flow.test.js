@@ -1,10 +1,11 @@
 import Vue from 'vue';
-import RootFlowStore from 'packages/flowstore';
+import MakeFlowStore from 'packages/flowstore';
+import {checkSourceHas} from 'packages/flowstore/util';
 import {NAME_PRE} from 'packages/flowstore/config';
 
-async function watcher(getter, setter) {
+async function watcher(getter, setter, vm) {
   var val = await new Promise(function (resolve, reject) {
-    var vm = new Vue({});
+    var vm = vm || new Vue({});
     let _t;
     let watcher = vm.$watch(getter, function (newVal) {
       clearTimeout(_t)
@@ -17,7 +18,7 @@ async function watcher(getter, setter) {
     _t = setTimeout(function () {
       resolve = null;
       reject("error");
-    }, 0);
+    }, 10);
   });
   return val;
 }
@@ -40,7 +41,7 @@ test('simple1', () => {
       }
     }
   };
-  let flow = RootFlowStore({
+  let flow = MakeFlowStore({
     name: "top",
     store
   });
@@ -48,6 +49,8 @@ test('simple1', () => {
   expect(flow[NAME_PRE + "top"].a).toEqual(1);
   flow.dispatch("setA", 123);
   expect(flow.a).toEqual(123);
+  expect(Object.keys(flow)).toEqual(["a"]);
+  expect({...flow}).toEqual({a: 123});
   expect(flow[NAME_PRE + "top"].a).toEqual(123);
 });
 
@@ -83,24 +86,29 @@ test('simple2', () => {
       }
     }
   };
-  let flowStore1 = RootFlowStore({
+  let flow1 = MakeFlowStore({
     name: "Store1",
     store: store1
   });
-  let flowStore2 = flowStore1.createStore({
+  let flow2 = flow1.createStore({
     name: "Store2",
     store: store2
   });
-  expect(flowStore2.a).toEqual(11);
-  expect(flowStore2.b).toEqual(22);
-  expect(flowStore2[NAME_PRE + "Store1"].b).toEqual(12);
-  expect(flowStore2[NAME_PRE + "Store2"].b).toEqual(22);
-  expect(flowStore2.findStore("Store1").b).toEqual(12);
-  expect(flowStore2.findStore("Store2").b).toEqual(22);
-  flowStore1.commit("setA", 100);
-  expect(flowStore2.a).toEqual(100);
-  flowStore2.commit("set", {name: "a", value: 200});
-  expect(flowStore2.a).toEqual(200);
+  expect("a" in flow2).toEqual(true);
+  expect(flow1.hasOwnProperty("a")).toEqual(true);
+  expect(flow2.hasOwnProperty("a")).toEqual(false);
+  // flow2.a = 123;
+  // expect(flow2.hasOwnProperty("a")).toEqual(true);
+  expect(flow2.a).toEqual(11);
+  expect(flow2.b).toEqual(22);
+  expect(flow2[NAME_PRE + "Store1"].b).toEqual(12);
+  expect(flow2[NAME_PRE + "Store2"].b).toEqual(22);
+  expect(flow2.findStore("Store1").b).toEqual(12);
+  expect(flow2.findStore("Store2").b).toEqual(22);
+  flow1.commit("setA", 100);
+  expect(flow2.a).toEqual(100);
+  flow2.commit("set", {name: "a", value: 200});
+  expect(flow2.a).toEqual(200);
 });
 
 test('simple3', () => {
@@ -114,7 +122,7 @@ test('simple3', () => {
       };
     }
   };
-  let flow = RootFlowStore({
+  let flow = MakeFlowStore({
     store
   }).pickStore("person").createStore({
     test: 'test'
@@ -145,9 +153,9 @@ test('simple4', () => {
       };
     }
   };
-  let flow = RootFlowStore({store});
+  let flow = MakeFlowStore({store});
   flow = flow.pickStore("data");
-  expect(flow[1].name).toEqual("bbb");
+  // expect(flow[1].name).toEqual("bbb");
   flow = flow.pickStore(0);
   expect(flow.name).toEqual("aaa");
   expect(flow.aaa).toEqual(1);
@@ -185,7 +193,7 @@ test('simple5', () => {
       ];
     }
   };
-  let flow = RootFlowStore({store});
+  let flow = MakeFlowStore({store});
   let flow1 = flow.pickStore(0);
   let flow2 = flow.pickStore(1);
   let flow3 = flow.pickStore(1112);
@@ -193,7 +201,6 @@ test('simple5', () => {
   expect(flow1.a).toEqual(1);
   expect(flow2.a).toEqual(2);
   expect(flow3.a).toEqual(undefined);
-
 });
 
 test('complex pickstore', async () => {
@@ -220,10 +227,21 @@ test('complex pickstore', async () => {
       ];
     }
   };
-  let flow = RootFlowStore({store});
-  let flow4 = flow.pickStore(2).pickStore("child").pickStore("childs").pickStore(0);
+  let flow = MakeFlowStore({
+    isIntercept: true,
+    store
+  });
+  let flow2 = flow.pickStore(2).pickStore("child").createStore({
+    store: {
+      state() {
+        return {
+          insert1: 1
+        }
+      },
+    }
+  }).pickStore("childs").pickStore(0);
   var calc = function () {
-    return flow4.a + flow4.b + flow4.c;
+    return flow2.a + flow2.b + flow2.c;
   };
   expect(calc()).toEqual(6);
   var val = await watcher(calc, function () {
@@ -231,10 +249,11 @@ test('complex pickstore', async () => {
     flow.state[2].child.b = 30;
     flow.state[2].child.childs[0].c = 50;
   });
+  expect(flow2.insert1).toEqual(1);
   expect(val).toEqual(100);
-
+  // todo
   var val = await watcher(function () {
-    let val = flow4.m;
+    let val = flow2.m;
     return val;
   }, function (state) {
     Vue.set(flow.state[2], "m", 122);
@@ -243,7 +262,7 @@ test('complex pickstore', async () => {
 });
 
 test('simple6', () => {
-  let flow = RootFlowStore({
+  let flow = MakeFlowStore({
     top: 1,
     c: 2
   });
@@ -253,8 +272,96 @@ test('simple6', () => {
   expect(flow1.c).toEqual(2);
 });
 
+test('joinStore', () => {
+  let flow = MakeFlowStore({
+    top: 1,
+    c: 2
+  }).joinStore([{a: 1, c: 3}, {a: 2}]);
+  expect(flow.a).toEqual(2);
+  expect(flow.c).toEqual(3);
+  expect(Object.keys(flow)).toEqual(["a", "c"]);
+  expect(flow.hasOwnProperty("c")).toEqual(true);
+  expect(flow.hasOwnProperty("top")).toEqual(false);
+  expect({...flow}).toEqual({"a": 2, "c": 3});
+  expect("top" in flow).toEqual(true);
+  expect("c" in flow).toEqual(true);
+  expect("a" in flow).toEqual(true);
+  expect("cccc" in flow).toEqual(false);
+});
+
+test('isStateReactive state', async () => {
+  var vm = new Vue({
+    data() {
+      var data = {
+        a: 1
+      };
+      return data;
+    },
+    computed: {
+      flow() {
+        var self = this;
+        return MakeFlowStore({
+          isStateReactive: true,
+          store: {
+            state() {
+              return self.$data;
+            }
+          }
+        });
+      }
+    }
+  });
+  expect(vm.flow.a).toEqual(1);
+  var val = await watcher(function () {
+    return vm.flow.a;
+  }, function () {
+    vm.$data.a = 100;
+  }, vm);
+  expect(val).toEqual(100);
+  expect(vm.flow.a).toEqual(100);
+});
+
+test('isStateReactive state 2', async () => {
+  var vm = new Vue({
+    data() {
+      var data = {
+        a: {
+          a: 1
+        }
+      };
+      return data;
+    },
+    render(h) {
+      console.log("render b", this.flow.a.b);
+    },
+    computed: {
+      flow() {
+        var self = this;
+        return MakeFlowStore({
+          isStateReactive: true,
+          isIntercept: true,
+          store: {
+            state() {
+              return self.$data;
+            }
+          }
+        });
+      }
+    }
+  });
+  vm.$mount();
+  expect(vm.flow.a.a).toEqual(1);
+  var val = await watcher(function () {
+    return vm.flow.a.b;
+  }, function () {
+    Vue.set(vm.$data.a, "b", 2);
+  }, vm);
+  expect(val).toEqual(2);
+  expect(vm.flow.a.b).toEqual(2);
+});
+
 test('simple7', async () => {
-  var flow1 = RootFlowStore({
+  var flow1 = MakeFlowStore({
     store: {
       state() {
         return {
@@ -292,7 +399,7 @@ test('simple7', async () => {
 });
 
 test('simple8', async () => {
-  var flow1 = RootFlowStore({
+  var flow1 = MakeFlowStore({
     store: {
       state() {
         return {
@@ -330,9 +437,9 @@ test('simple8', async () => {
 });
 
 test('simple9', async () => {
-  // 开启highLevel能监听到新增数据变化
-  var flow = RootFlowStore({
-    highLevel: true,
+  // 开启isIntercept能监听到新增数据变化
+  var flow = MakeFlowStore({
+    isIntercept: true,
     store: {
       state() {
         return {}
@@ -351,9 +458,9 @@ test('simple9', async () => {
     flow.commit("setTest", 2);
   });
   expect(val).toEqual(2);
-  // 不开启highLevel不能监听到新增数据变化
-  var flow = RootFlowStore({
-    highLevel: false,
+  // 不开启isIntercept不能监听到新增数据变化
+  var flow = MakeFlowStore({
+    isIntercept: false,
     store: {
       state() {
         return {}
@@ -377,7 +484,7 @@ test('simple9', async () => {
 }, 2000);
 
 test('数据改变，自动更新', async () => {
-  var flow = RootFlowStore({
+  var flow = MakeFlowStore({
     store: {
       state() {
         return {
@@ -404,7 +511,7 @@ test('数据改变，自动更新', async () => {
 });
 
 test('父级数据改变，自动更新', async () => {
-  var flow = RootFlowStore({
+  var flow = MakeFlowStore({
     store: {
       state() {
         return {
@@ -438,7 +545,7 @@ test('父级数据改变，自动更新', async () => {
 });
 
 test('父级数据改变，自动更新 (pickStore)', async () => {
-  var flow = RootFlowStore({
+  var flow = MakeFlowStore({
     store: {
       state() {
         return {
@@ -469,7 +576,7 @@ test('父级数据改变，自动更新 (pickStore)', async () => {
 });
 
 test('父级数据改变，自动更新 (pickStore)', async () => {
-  var flow = RootFlowStore({
+  var flow = MakeFlowStore({
     store: {
       state() {
         return {
